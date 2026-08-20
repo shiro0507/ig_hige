@@ -2,11 +2,11 @@
 
 ig_sleep/ig_akiyaと同じ構成でスキャフォールド(2026-08-20)。今回は静止画投稿にも対応(REELSと画像を自動判別)。
 
-- Instagramアカウント: `@medikaratsuyoihigeotoko`
-- Facebookページ: (未確認 — 連携先ページ名・ID要確認)
-- `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_ACCOUNT_ID` GitHub Secrets: **未設定**
+- Instagramアカウント: `@medikaratsuyoihigeotoko` (`INSTAGRAM_ACCOUNT_ID` = `17841461989825682`)
+- Facebookページ: `Medikaratsuyoihigeotoko`（2026-08-20新規作成、カテゴリ「個人ブログ」）。IG側のアカウントセンターからページにリンク済み。
+- `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_ACCOUNT_ID` GitHub Secrets: **設定済み**(2026-08-20)。`insight.yml`手動実行で疎通確認済み(フォロワー数4)。
 
-## 1. アクセストークン取得 — 未完了
+## 1. アクセストークン取得 — 完了(2026-08-20)
 
 Meta App `akiya.app` (APP_ID: `27566135536361698`) をig_akiya/ig_sleepと共用。
 
@@ -18,7 +18,9 @@ Meta App `akiya.app` (APP_ID: `27566135536361698`) をig_akiya/ig_sleepと共用
   ```
   「設定を編集」からページ・IGアカウントを明示的に選択すると、`EAA`/`EAG`プレフィックスの正しいトークンが発行される。
   - `pages_manage_metadata`をscopeに含めると"Invalid Scopes"エラーになるので外すこと。
-- 新しく許可したページは`me/accounts`一覧にすぐ反映されないことがある。その場合は該当ページIDを直接指定して確認する: `GET /{page-id}?fields=name,instagram_business_account`
+- **新規発見(ig_hige, 2026-08-20): akiya.appが既に「ビジネス統合」化している場合、素の`設定を編集`はページ選択画面を出さず、過去の許可(古いページのみ)をそのまま素通りしてしまう。** この場合はOAuth URLに`&auth_type=rerequest`を追加して再認可を強制すると、「akiya.appがアクセスするページを選択」→「akiya.appがアクセスするInstagramアカウントを選択」の画面が改めて出るので、新しいページ/IGアカウントに明示的にチェックを入れて進める。
+- 新しく許可したページは`me/accounts`一覧にすぐ反映されないことがある。その場合は該当ページIDまたはIGアカウントIDを直接指定して確認する: `GET /{page-id}?fields=name,instagram_business_account` または `GET /{ig-account-id}?fields=id,username`
+- Facebookページ↔Instagram連携自体は、ページ単体の「ページ設定」画面ではなく、**ページのプロフェッショナルダッシュボード → その他 → リンク済みのアカウント → Instagram → アカウントをリンク**から行う（IG側のアカウントセンター/プロアカウント設定には見当たらない）。IGアカウント側は事前にブラウザでログインしておく必要がある。
 
 取得した短期トークンは以下で長期化:
 ```
@@ -26,6 +28,7 @@ python scripts/exchange_token.py <短期トークン>
 gh secret set INSTAGRAM_ACCESS_TOKEN --repo shiro0507/ig_hige --body "<長期トークン>"
 gh secret set INSTAGRAM_ACCOUNT_ID --repo shiro0507/ig_hige --body "<IGアカウントID>"
 ```
+長期トークンは2026-08-20発行、約60日後(2026年10月中旬頃)に手動更新が必要。
 
 ## 2. コンテンツ
 
