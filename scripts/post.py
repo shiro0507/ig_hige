@@ -1,0 +1,182 @@
+import argparse
+import os
+import sys
+import time
+import requests
+from datetime import date
+from pathlib import Path
+
+ACCESS_TOKEN = os.environ["INSTAGRAM_ACCESS_TOKEN"]
+ACCOUNT_ID = os.environ["INSTAGRAM_ACCOUNT_ID"]
+
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "shiro0507/ig_hige")
+IG_API = "https://graph.facebook.com/v22.0"
+
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+def parse_thumb_offset(value: str, fps: float) -> int:
+    stripped = value.strip()
+    if stripped.isdigit():
+        return int(int(stripped) / fps * 1000)
+    parts = stripped.replace(".", ":").split(":")
+    if len(parts) != 3:
+        raise ValueError(f"thumb_offset must be frame number or hh:mm:ff format, got: {value!r}")
+    hh, mm, ff = int(parts[0]), int(parts[1]), int(parts[2])
+    return int((hh * 3600 + mm * 60) * 1000 + (ff / fps) * 1000)
+
+
+def find_media(content_dir: Path) -> tuple[Path, str] | tuple[None, None]:
+    video_path = content_dir / "video.mp4"
+    if video_path.exists():
+        return video_path, "video"
+    for ext in IMAGE_EXTENSIONS:
+        image_path = content_dir / f"image{ext}"
+        if image_path.exists():
+            return image_path, "image"
+    return None, None
+
+
+def get_content(target_date: str, skip_media_check: bool = False) -> tuple[Path, str, str, int | None]:
+    content_dir = Path("content") / target_date
+    caption_path = content_dir / "caption.txt"
+    thumb_offset_path = content_dir / "thumb_offset.txt"
+    fps_path = content_dir / "fps.txt"
+
+    media_path, media_kind = find_media(content_dir)
+    if not skip_media_check and media_path is None:
+        print(f"No content found for {target_date}, skipping.")
+        sys.exit(0)
+
+    caption = caption_path.read_text(encoding="utf-8").strip() if caption_path.exists() else ""
+
+    thumb_offset = None
+    if media_kind == "video" and thumb_offset_path.exists():
+        fps = float(fps_path.read_text().strip()) if fps_path.exists() else 30.0
+        thumb_offset = parse_thumb_offset(thumb_offset_path.read_text(), fps)
+
+    return media_path, media_kind, caption, thumb_offset
+
+
+def get_media_url(media_path: Path, target_date: str) -> str:
+    owner, repo = GITHUB_REPOSITORY.split("/", 1)
+    sha = os.environ.get("GITHUB_SHA", "main")
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{sha}/content/{target_date}/{media_path.name}"
+
+
+_BLOCKED_HOSTS = ("github.com/", "github.com:")
+
+def _validate_media_url(url: str):
+    for host in _BLOCKED_HOSTS:
+        if host in url:
+            raise ValueError(
+                f"Instagram cannot fetch media from {url!r} — "
+                "GitHub's robots.txt blocks its crawler.\n"
+                "Use raw.githubusercontent.com (commit the file to the repo) "
+                "or a public CDN (S3, R2, etc.)."
+            )
+
+
+def create_reel_container(video_url: str, caption: str, thumb_offset: int | None = None) -> str:
+    params = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption,
+        "share_to_feed": "true",
+        "access_token": ACCESS_TOKEN,
+    }
+    if thumb_offset is not None:
+        params["thumb_offset"] = thumb_offset
+    r = requests.post(f"{IG_API}/{ACCOUNT_ID}/media", params=params)
+    if not r.ok:
+        print("Meta API error response:", r.text)
+
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def create_image_container(image_url: str, caption: str) -> str:
+    params = {
+        "image_url": image_url,
+        "caption": caption,
+        "access_token": ACCESS_TOKEN,
+    }
+    r = requests.post(f"{IG_API}/{ACCOUNT_ID}/media", params=params)
+    if not r.ok:
+        print("Meta API error response:", r.text)
+
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def wait_for_container(container_id: str, timeout: int = 300):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = requests.get(
+            f"{IG_API}/{container_id}",
+            params={"fields": "status_code,status", "access_token": ACCESS_TOKEN},
+        )
+        r.raise_for_status()
+        data = r.json()
+        status_code = data.get("status_code")
+        print(f"  container status: {status_code}")
+        if status_code == "FINISHED":
+            return
+        if status_code == "ERROR":
+            raise RuntimeError(f"Container processing failed: {data}")
+        time.sleep(15)
+    raise TimeoutError("Timed out waiting for Instagram to process the media")
+
+
+def publish_media(container_id: str) -> str:
+    r = requests.post(
+        f"{IG_API}/{ACCOUNT_ID}/media_publish",
+        params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", help="Target date (YYYY-MM-DD), defaults to today")
+    parser.add_argument("--video-url", help="Direct video URL (skips GitHub URL construction, posts as a Reel)")
+    parser.add_argument("--image-url", help="Direct image URL (skips GitHub URL construction, posts as a photo)")
+    parser.add_argument("--thumb-offset", type=int, help="Thumbnail frame offset in milliseconds (video only)")
+    args = parser.parse_args()
+
+    target_date = args.date or date.today().isoformat()
+    print(f"Posting content for {target_date}")
+
+    if args.video_url:
+        media_url, media_kind = args.video_url, "video"
+        _, _, caption, thumb_offset = get_content(target_date, skip_media_check=True)
+    elif args.image_url:
+        media_url, media_kind = args.image_url, "image"
+        _, _, caption, thumb_offset = get_content(target_date, skip_media_check=True)
+    else:
+        media_path, media_kind, caption, thumb_offset = get_content(target_date)
+        media_url = get_media_url(media_path, target_date)
+
+    print(f"Media kind: {media_kind}")
+    print(f"Media URL: {media_url}")
+    _validate_media_url(media_url)
+
+    print("Creating Instagram media container...")
+    if media_kind == "video":
+        thumb_offset = args.thumb_offset if args.thumb_offset is not None else thumb_offset
+        container_id = create_reel_container(media_url, caption, thumb_offset)
+    else:
+        container_id = create_image_container(media_url, caption)
+    print(f"Container ID: {container_id}")
+
+    print("Waiting for Instagram to process the media...")
+    wait_for_container(container_id)
+
+    print("Publishing post...")
+    post_id = publish_media(container_id)
+    print(f"Done! Published post ID: {post_id}")
+
+
+if __name__ == "__main__":
+    main()
